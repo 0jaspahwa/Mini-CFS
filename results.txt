@@ -1,0 +1,136 @@
+﻿preemptive vruntime scheduler: measurements
+quantum 4 ms, nice-0 weight 1024
+
+==================================================================
+0.  invariants under churn
+==================================================================
+  ticks simulated      : 20000
+  full validations     : 800
+  bst order / heap / cached-leftmost / count : all hold
+
+==================================================================
+1.  tree shape under monotonically increasing keys
+==================================================================
+tasks   log2(n)   BST h       treap h (mean)  treap h max BST vis/tick  treap vis/tick
+--------------------------------------------------------------------------------------
+8       3.0       8           4.9             7           9.0           5.6           
+16      4.0       16          7.1             10          17.0          7.2           
+32      5.0       32          9.4             13          33.0          8.6           
+64      6.0       64          11.8            16          65.0          10.0          
+128     7.0       128         14.1            19          129.0         11.4          
+256     8.0       256         16.8            21          257.0         12.9          
+512     9.0       512         19.8            23          513.0         14.4          
+1024    10.0      1024        22.4            27          1025.0        15.7          
+
+  BST height = task count. It's a linked list, not the worst
+  case it hits sometimes - the only case it has.
+
+==================================================================
+2.  cost of the most-asked question
+==================================================================
+  cost of one "who runs next", averaged over 200000 tree states.
+  a single static tree is a bad measurement - leftmost node depth
+  is randomised, so one snapshot mostly reports luck.
+
+tasks   walk visits/query cached visits/query walk ns/query   cached ns/query 
+------------------------------------------------------------------------------
+16      3.38              0.00                3.82            1.78            
+64      4.73              0.00                3.76            2.61            
+256     6.14              0.00                8.92            2.79            
+1024    7.55              0.00                1.08            0.00            
+4096    8.87              0.00                5.01            1.69            
+
+  per full tick (pick + charge + reinsert), cache kept correct:
+
+tasks   visits/tick     ns/tick         2*ln(n)       
+------------------------------------------------------
+16      7.13            212.89          5.5           
+64      9.94            271.53          8.3           
+256     12.76           328.79          11.1          
+1024    15.55           286.46          13.9          
+4096    18.15           200.72          16.6          
+
+  maintaining the cache is basically free: insert updates it with
+  one comparison, and popMin finds the next leftmost in the same
+  descent it already makes. nothing walks the tree twice.
+
+==================================================================
+3.  fairness, from one comparison
+==================================================================
+  4 equal tasks, first 20 picks:
+    1 2 3 4 1 2 3 4 1 2 3 4 1 2 3 4 1 2 3 4 
+  round robin. no code asked for it.
+
+  8 equal tasks, 200000 ticks:
+    cpu time, min .. max   : 100000 ms .. 100000 ms
+    ticks apart            : 0
+    vruntime spread        : 0 ms  (one slice is 4 ms)
+    worst share deviation  : 0.0000 %
+    jain fairness index    : 1.000000
+
+  mixed nice levels, 400000 ticks:
+
+pid   nice    weight    ideal share   actual share  error     
+------------------------------------------------------------
+1     -5      3121      0.5559        0.5559        -0.0003   
+2     0       1024      0.1824        0.1824        0.0007    
+3     0       1024      0.1824        0.1824        -0.0006   
+4     5       335       0.0597        0.0597        0.0004    
+5     10      110       0.0196        0.0196        0.0058    
+
+    worst share deviation  : 0.0058 %
+    jain fairness index    : 1.000000
+  priority is one division in the vruntime update. no separate
+  priority code.
+
+==================================================================
+4.  per-core queues and work stealing
+==================================================================
+  A. throughput: 32 equal tasks, all dumped on core 0 of 4
+
+policy                ticks       ideal     vs ideal      idle core-tickssteals    
+----------------------------------------------------------------------------------
+no stealing           3200        800       4.00          9600          0         
+steal when idle       812         800       1.01          48            31        
+steal on imbalance    800         800       1.00          0             32        
+imbalance, raw vrt    800         800       1.00          0             32        
+
+  B. fairness under churn: 4 never-ending tasks, one per core,
+     plus 40 short tasks dumped on core 0 every 8000 ticks. the 4
+     are identical, so they should end with identical CPU time.
+
+policy                min ms     max ms     max/min   jain       done     migrations  worst wait  drift ms    
+--------------------------------------------------------------------------------------------------------------
+no stealing           35264      800000     22.69     0.7717     200      0           800         764740      
+steal when idle       35264      800000     22.69     0.7717     200      0           800         764740      
+steal on imbalance    415904     416096     1.00      1.0000     960      936         18          288         
+imbalance, raw vrt    416000     416000     1.00      1.0000     960      1008        18          8           
+
+     idle-only never fires here - every core always has its own
+     task, so none is ever empty, and core 0 drowns anyway. same
+     score as no stealing at all.
+     raw vruntime is NOT broken in this test: a balancer that keeps
+     counts level also keeps clocks close, so re-timing has nothing
+     to fix. that's a real result, and it's why C exists.
+
+  C. one migration, across cores whose clocks drifted apart.
+     core A ran 1 task for 10k ticks, core B ran 20. then one task
+     moves from B to A. watch A's resident task.
+
+on arrival      drift ms      resident cpu%   migrant cpu%    resident wait   
+----------------------------------------------------------------------------
+re-timed        38000         50.0            50.0            1               
+raw vruntime    38000         26.2            73.8            9500            
+
+     same steal, same task. only difference: one line placing the
+     arrival against the local floor.
+
+  D. known gap: balancer moves tasks by count, not weight.
+     same setup, mixed nice levels, best policy:
+
+    worst share deviation  : 73.23 %
+    jain fairness index    : 0.89615
+    per core it's still exact. globally it's not - a core of
+    heavy tasks and a core of light ones can have the same task
+    count. fix is balancing on summed weight. not done yet.
+
